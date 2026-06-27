@@ -136,7 +136,7 @@ typedef struct
 static uint8 snapshot_image[MT9V03X_H][MT9V03X_W];
 static uint8 display_image[MT9V03X_H][MT9V03X_W];
 static storage_header_t storage_header;
-static uint8 display_mode = DISPLAY_MODE_RAW;
+static uint8 display_mode = DISPLAY_MODE_BINARY;
 static mine_target_t current_target;
 static image_record_t live_record;
 static uint16 recog_row_count[MT9V03X_H];

@@ -6,6 +6,13 @@
 
 本项目用于学习、调试和阶段性保存代码版本。修改前必须保证当前版本已经被 Git 保存，避免丢失可用代码。
 
+## 固定工程与仓库路径
+
+- 后续代码修改、Git 提交和 GitHub 推送只允许在 `C:\Users\86156\Documents\smartcar` 中执行。
+- 不要从旧的中文目录或其他工程副本提交代码。
+- 执行 Git 操作前先使用 `git rev-parse --show-toplevel` 确认仓库根目录。
+- 当前远程仓库为 `https://github.com/deegasojib468-netizen/smart-car-code.git`。
+
 ## Codex 工作规则
 
 ### 1. 修改前必须先做版本检查
