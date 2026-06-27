@@ -1,0 +1,43 @@
+# IAR build output and browse databases
+**/Debug_m7_0/
+**/Debug_m7_1/
+**/Release_m7_0/
+**/Release_m7_1/
+**/Obj/
+**/List/
+**/Exe/
+**/BrowseInfo/
+*.o
+*.obj
+*.pbi
+*.pbi.dep
+*.pbw
+*.pbd
+*.pbd.browse
+*.browse
+*.map
+*.lst
+*.out
+*.hex
+
+# IAR per-user workspace state
+*.wsdt
+*.dbgdt
+*.dnx
+*.crun
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.vs/
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.log
+~$*
+
