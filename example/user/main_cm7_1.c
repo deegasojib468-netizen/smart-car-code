@@ -1,11 +1,19 @@
 /*********************************************************************************************************************
- * CYT4BB7 CM7_1 MT9V03X three-stage vision diagnostic build.
+ * CYT4BB7 CM7_1 MT9V03X four-stage vision diagnostic build.
  *
- * S0 aligns to the white box, S1 confirms the first line crossing, and S2 limits spin speed near a boundary.
+ * S0 aligns to the box, S1 confirms line crossing, S2 waits for forward completion, and S3 protects spinning.
  * Detection only reads work_image; drawing only writes display_image.
  ********************************************************************************************************************/
 
 #include "zf_common_headfile.h"
+
+#define CAMERA_MINIMAL_RAW_TEST                  (1U)
+#define CAMERA_DIAG_TEST_PATTERN                 (0U)
+
+#define VISION_RAW_IMAGE_TEST                    (0U)
+#define VISION_STATUS_BAR_ENABLE                 (1U)
+#define VISION_OBJECT_OVERLAY_ENABLE             (0U)
+#define ENABLE_FORCE_NEXT_KEY                    (0U)
 
 #define BOX_WHITE_THRESHOLD                     (225U)
 #define BOX_ROI_X_MIN                           (5)
@@ -53,11 +61,22 @@
 #define SPIN_SPEED_SLOW                         (40U)
 #define SPIN_SPEED_STOP                         (0U)
 
+#define BOUNDARY_RELEASE_DISTANCE               (30)
+#define BOUNDARY_RELEASE_STABLE_FRAMES          (3U)
+
+#define VISION_KEY_DEBOUNCE_COUNT               (20U)
+#define VISION_KEY_COUNT                        (4U)
+#define VISION_KEY_POST_FORWARD_INDEX           (0U)
+#define VISION_KEY_SPIN_DONE_INDEX              (1U)
+#define VISION_KEY_FORCE_NEXT_INDEX             (2U)
+#define VISION_KEY_RESET_INDEX                  (3U)
+
 typedef enum
 {
     VISION_STATE_BOX_ALIGN = 0,
     VISION_STATE_ENTER_LINE = 1,
-    VISION_STATE_SPIN_PROTECT = 2
+    VISION_STATE_POST_LINE_FORWARD = 2,
+    VISION_STATE_SPIN_PROTECT = 3
 } vision_state_t;
 
 typedef struct
@@ -116,9 +135,32 @@ static uint8 s_box_align_stable_count = 0U;
 static uint8 s_box_align_latched = 0U;
 static uint8 s_first_line_cross_count = 0U;
 static uint8 s_first_line_crossed_latched = 0U;
+static uint8 s_boundary_release_count = 0U;
+
+static const gpio_pin_enum s_vision_key_pins[VISION_KEY_COUNT] =
+{
+    P20_3, P20_2, P20_1, P20_0
+};
+static uint8 s_key_last_sample[VISION_KEY_COUNT] = {1U, 1U, 1U, 1U};
+static uint8 s_key_stable_level[VISION_KEY_COUNT] = {1U, 1U, 1U, 1U};
+static uint8 s_key_debounce_count[VISION_KEY_COUNT] = {0U, 0U, 0U, 0U};
 
 volatile uint8 g_vision_state = VISION_STATE_BOX_ALIGN;
 volatile uint16 g_mine_area_count = 0U;
+
+volatile uint8 g_forward_enter_request = 0U;
+volatile uint8 g_line1_crossed = 0U;
+volatile uint8 g_post_line_forward_request = 0U;
+volatile uint8 g_post_line_forward_done_input = 0U;
+volatile uint8 g_spin_start_request = 0U;
+volatile uint8 g_spin_done_input = 0U;
+volatile uint8 g_boundary_stop_request = 0U;
+volatile uint8 g_boundary_back_request = 0U;
+
+volatile uint8 g_key_post_forward_done = 0U;
+volatile uint8 g_key_spin_done = 0U;
+volatile uint8 g_key_force_next_state = 0U;
+volatile uint8 g_key_reset_to_s0 = 0U;
 
 volatile uint8 g_box_valid = 0U;
 volatile int16 g_box_center_x = -1;
@@ -138,7 +180,6 @@ volatile int16 g_spin_line_y_bottom = -1;
 volatile int16 g_spin_line_distance = -1;
 volatile uint8 g_spin_speed_limit = SPIN_SPEED_NORMAL;
 volatile uint16 g_spin_line_score = 0U;
-volatile uint8 g_spin_done_input = 0U;
 
 static void draw_safe_hline(uint8 *image, int16 y, int16 x0, int16 x1, uint8 color)
 {
@@ -229,6 +270,14 @@ static void draw_small_char(uint8 *image, int16 x, int16 y, char ch, uint8 color
         case 'R': rows[0] = 6U; rows[1] = 5U; rows[2] = 6U; rows[3] = 5U; rows[4] = 5U; break;
         case 'D': rows[0] = 6U; rows[1] = 5U; rows[2] = 5U; rows[3] = 5U; rows[4] = 6U; break;
         case 'P': rows[0] = 6U; rows[1] = 5U; rows[2] = 6U; rows[3] = 4U; rows[4] = 4U; break;
+        case 'A': rows[0] = 2U; rows[1] = 5U; rows[2] = 7U; rows[3] = 5U; rows[4] = 5U; break;
+        case 'B': rows[0] = 6U; rows[1] = 5U; rows[2] = 6U; rows[3] = 5U; rows[4] = 6U; break;
+        case 'F': rows[0] = 7U; rows[1] = 4U; rows[2] = 6U; rows[3] = 4U; rows[4] = 4U; break;
+        case 'I': rows[0] = 7U; rows[1] = 2U; rows[2] = 2U; rows[3] = 2U; rows[4] = 7U; break;
+        case 'K': rows[0] = 5U; rows[1] = 5U; rows[2] = 6U; rows[3] = 5U; rows[4] = 5U; break;
+        case 'M': rows[0] = 5U; rows[1] = 7U; rows[2] = 7U; rows[3] = 5U; rows[4] = 5U; break;
+        case 'T': rows[0] = 7U; rows[1] = 2U; rows[2] = 2U; rows[3] = 2U; rows[4] = 2U; break;
+        case 'W': rows[0] = 5U; rows[1] = 5U; rows[2] = 7U; rows[3] = 7U; rows[4] = 5U; break;
         case ' ': break;
         case '+': rows[0] = 0U; rows[1] = 2U; rows[2] = 7U; rows[3] = 2U; rows[4] = 0U; break;
         case '-': rows[0] = 0U; rows[1] = 0U; rows[2] = 7U; rows[3] = 0U; rows[4] = 0U; break;
@@ -329,6 +378,35 @@ static void reset_spin_stage(void)
     spin_result.spin_line_y_center = -1;
     spin_result.spin_line_distance = -1;
     spin_result.spin_speed_limit = SPIN_SPEED_NORMAL;
+    s_boundary_release_count = 0U;
+    g_boundary_stop_request = 0U;
+    g_boundary_back_request = 0U;
+}
+
+static void reset_control_requests_for_new_area(void)
+{
+    g_forward_enter_request = 0U;
+    g_line1_crossed = 0U;
+    g_post_line_forward_request = 0U;
+    g_post_line_forward_done_input = 0U;
+    g_spin_start_request = 0U;
+    g_spin_done_input = 0U;
+    g_boundary_stop_request = 0U;
+    g_boundary_back_request = 0U;
+
+    g_key_post_forward_done = 0U;
+    g_key_spin_done = 0U;
+    g_key_force_next_state = 0U;
+    g_key_reset_to_s0 = 0U;
+}
+
+static void vision_reset_to_s0(void)
+{
+    reset_box_stage();
+    reset_enter_line_stage();
+    reset_spin_stage();
+    reset_control_requests_for_new_area();
+    g_vision_state = VISION_STATE_BOX_ALIGN;
 }
 
 static void vision_set_state(vision_state_t new_state)
@@ -338,10 +416,128 @@ static void vision_set_state(vision_state_t new_state)
         return;
     }
 
+    if(VISION_STATE_BOX_ALIGN == new_state)
+    {
+        vision_reset_to_s0();
+        return;
+    }
+
     reset_box_stage();
     reset_enter_line_stage();
     reset_spin_stage();
     g_vision_state = (uint8)new_state;
+}
+
+#if ENABLE_FORCE_NEXT_KEY
+static void vision_force_next_state(void)
+{
+    switch((vision_state_t)g_vision_state)
+    {
+        case VISION_STATE_BOX_ALIGN:
+            g_forward_enter_request = 1U;
+            vision_set_state(VISION_STATE_ENTER_LINE);
+            break;
+
+        case VISION_STATE_ENTER_LINE:
+            g_forward_enter_request = 0U;
+            g_line1_crossed = 1U;
+            g_post_line_forward_request = 1U;
+            vision_set_state(VISION_STATE_POST_LINE_FORWARD);
+            break;
+
+        case VISION_STATE_POST_LINE_FORWARD:
+            g_post_line_forward_request = 0U;
+            g_spin_start_request = 1U;
+            vision_set_state(VISION_STATE_SPIN_PROTECT);
+            break;
+
+        case VISION_STATE_SPIN_PROTECT:
+            g_mine_area_count++;
+            vision_set_state(VISION_STATE_BOX_ALIGN);
+            break;
+
+        default:
+            vision_reset_to_s0();
+            break;
+    }
+}
+#endif
+
+static void vision_key_init(void)
+{
+    uint8 index;
+
+    for(index = 0U; index < VISION_KEY_COUNT; index++)
+    {
+        gpio_init(s_vision_key_pins[index], GPI, GPIO_HIGH, GPI_PULL_UP);
+        s_key_last_sample[index] = gpio_get_level(s_vision_key_pins[index]);
+        s_key_stable_level[index] = s_key_last_sample[index];
+        s_key_debounce_count[index] = 0U;
+    }
+}
+
+static void vision_key_update(void)
+{
+    uint8 index;
+    uint8 pressed_edge[VISION_KEY_COUNT] = {0U, 0U, 0U, 0U};
+
+    system_delay_ms(1U);
+
+    for(index = 0U; index < VISION_KEY_COUNT; index++)
+    {
+        uint8 sample = gpio_get_level(s_vision_key_pins[index]);
+
+        if(sample == s_key_last_sample[index])
+        {
+            if(s_key_debounce_count[index] < VISION_KEY_DEBOUNCE_COUNT)
+            {
+                s_key_debounce_count[index]++;
+            }
+        }
+        else
+        {
+            s_key_last_sample[index] = sample;
+            s_key_debounce_count[index] = 0U;
+        }
+
+        if((s_key_debounce_count[index] >= VISION_KEY_DEBOUNCE_COUNT)
+        && (s_key_stable_level[index] != sample))
+        {
+            s_key_stable_level[index] = sample;
+            s_key_debounce_count[index] = 0U;
+            if(GPIO_LOW == sample)
+            {
+                pressed_edge[index] = 1U;
+            }
+        }
+    }
+
+    if(pressed_edge[VISION_KEY_POST_FORWARD_INDEX]
+    && (VISION_STATE_POST_LINE_FORWARD == (vision_state_t)g_vision_state))
+    {
+        g_key_post_forward_done = 1U;
+    }
+
+    if(pressed_edge[VISION_KEY_SPIN_DONE_INDEX]
+    && (VISION_STATE_SPIN_PROTECT == (vision_state_t)g_vision_state))
+    {
+        g_key_spin_done = 1U;
+    }
+
+#if ENABLE_FORCE_NEXT_KEY
+    if(pressed_edge[VISION_KEY_FORCE_NEXT_INDEX])
+    {
+        g_key_force_next_state = 1U;
+        vision_force_next_state();
+        g_key_force_next_state = 0U;
+    }
+#endif
+
+    if(pressed_edge[VISION_KEY_RESET_INDEX])
+    {
+        g_key_reset_to_s0 = 1U;
+        vision_reset_to_s0();
+    }
 }
 
 static void vision_clear_current_frame_result(void)
@@ -361,6 +557,9 @@ static void vision_clear_current_frame_result(void)
             enter_result.line1_y_top = -1;
             enter_result.line1_y_bottom = -1;
             enter_result.line1_y_center = -1;
+            break;
+
+        case VISION_STATE_POST_LINE_FORWARD:
             break;
 
         case VISION_STATE_SPIN_PROTECT:
@@ -484,7 +683,9 @@ static void update_box_align_state(box_result_t *result)
 
 static void draw_box_overlay(uint8 *image, const box_result_t *result)
 {
-    if((NULL == image) || (NULL == result) || (0U == result->box_valid))
+    if((NULL == image) || (NULL == result)
+    || (VISION_STATE_BOX_ALIGN != (vision_state_t)g_vision_state)
+    || (0U == result->box_valid))
     {
         return;
     }
@@ -500,10 +701,14 @@ static void run_box_align_stage(void)
 {
     detect_box_center(work_image[0], &box_result);
     update_box_align_state(&box_result);
-    draw_box_overlay(display_image[0], &box_result);
+    if(VISION_OBJECT_OVERLAY_ENABLE)
+    {
+        draw_box_overlay(display_image[0], &box_result);
+    }
 
     if(box_result.enter_line_enable)
     {
+        g_forward_enter_request = 1U;
         vision_set_state(VISION_STATE_ENTER_LINE);
     }
 }
@@ -645,7 +850,9 @@ static void update_first_line_cross_state(enter_line_result_t *result)
 
 static void draw_enter_line_overlay(uint8 *image, const enter_line_result_t *result)
 {
-    if((NULL == image) || (NULL == result) || (0U == result->line1_valid))
+    if((NULL == image) || (NULL == result)
+    || (VISION_STATE_ENTER_LINE != (vision_state_t)g_vision_state)
+    || (0U == result->line1_valid))
     {
         return;
     }
@@ -662,10 +869,28 @@ static void run_enter_line_stage(void)
 {
     detect_enter_line1_segment(work_image[0], &enter_result);
     update_first_line_cross_state(&enter_result);
-    draw_enter_line_overlay(display_image[0], &enter_result);
+    if(VISION_OBJECT_OVERLAY_ENABLE)
+    {
+        draw_enter_line_overlay(display_image[0], &enter_result);
+    }
 
     if(enter_result.enter_ready)
     {
+        g_forward_enter_request = 0U;
+        g_line1_crossed = 1U;
+        g_post_line_forward_request = 1U;
+        vision_set_state(VISION_STATE_POST_LINE_FORWARD);
+    }
+}
+
+static void run_post_line_forward_stage(void)
+{
+    if(g_post_line_forward_done_input || g_key_post_forward_done)
+    {
+        g_post_line_forward_done_input = 0U;
+        g_key_post_forward_done = 0U;
+        g_post_line_forward_request = 0U;
+        g_spin_start_request = 1U;
         vision_set_state(VISION_STATE_SPIN_PROTECT);
     }
 }
@@ -793,9 +1018,49 @@ static void update_spin_speed_limit(spin_result_t *result)
     }
 }
 
+static void update_boundary_requests(spin_result_t *result)
+{
+    if(NULL == result)
+    {
+        return;
+    }
+
+    if(result->spin_line_valid && (result->spin_line_distance <= SPIN_STOP_DISTANCE))
+    {
+        g_boundary_stop_request = 1U;
+        g_boundary_back_request = 1U;
+        s_boundary_release_count = 0U;
+    }
+    else if((0U == result->spin_line_valid)
+        || (result->spin_line_distance >= BOUNDARY_RELEASE_DISTANCE))
+    {
+        if(s_boundary_release_count < BOUNDARY_RELEASE_STABLE_FRAMES)
+        {
+            s_boundary_release_count++;
+        }
+        if(s_boundary_release_count >= BOUNDARY_RELEASE_STABLE_FRAMES)
+        {
+            g_boundary_stop_request = 0U;
+            g_boundary_back_request = 0U;
+            result->spin_speed_limit = SPIN_SPEED_NORMAL;
+        }
+    }
+    else
+    {
+        s_boundary_release_count = 0U;
+    }
+
+    if(g_boundary_stop_request || g_boundary_back_request)
+    {
+        result->spin_speed_limit = SPIN_SPEED_STOP;
+    }
+}
+
 static void draw_nearest_line_overlay(uint8 *image, const spin_result_t *result)
 {
-    if((NULL == image) || (NULL == result) || (0U == result->spin_line_valid))
+    if((NULL == image) || (NULL == result)
+    || (VISION_STATE_SPIN_PROTECT != (vision_state_t)g_vision_state)
+    || (0U == result->spin_line_valid))
     {
         return;
     }
@@ -812,11 +1077,19 @@ static void run_spin_protect_stage(void)
 {
     detect_nearest_boundary_line(work_image[0], &spin_result);
     update_spin_speed_limit(&spin_result);
-    draw_nearest_line_overlay(display_image[0], &spin_result);
+    update_boundary_requests(&spin_result);
+    if(VISION_OBJECT_OVERLAY_ENABLE)
+    {
+        draw_nearest_line_overlay(display_image[0], &spin_result);
+    }
 
-    if(g_spin_done_input)
+    if(g_spin_done_input || g_key_spin_done)
     {
         g_spin_done_input = 0U;
+        g_key_spin_done = 0U;
+        g_spin_start_request = 0U;
+        g_boundary_stop_request = 0U;
+        g_boundary_back_request = 0U;
         g_mine_area_count++;
         vision_set_state(VISION_STATE_BOX_ALIGN);
     }
@@ -876,23 +1149,53 @@ static void draw_status_overlay(uint8 *image)
                 enter_result.enter_ready ? '1' : '0', 0U);
             break;
 
+        case VISION_STATE_POST_LINE_FORWARD:
+            draw_small_text(image, x, 2, "S2 WAIT FWD K", 0U);
+            draw_small_char(image, 54, 2,
+                g_key_post_forward_done ? '1' : '0', 0U);
+            draw_small_text(image, 58, 2, " M", 0U);
+            draw_small_char(image, 66, 2,
+                g_post_line_forward_done_input ? '1' : '0', 0U);
+            break;
+
         case VISION_STATE_SPIN_PROTECT:
-            draw_small_text(image, x, 2, "S2 Y", 0U);
-            if(spin_result.spin_line_valid)
+            if(g_boundary_back_request)
             {
-                x = draw_small_int(image, 18, 2, spin_result.spin_line_y_bottom, 0U);
-                draw_small_text(image, x, 2, " D", 0U);
-                x = draw_small_int(image, (int16)(x + 8), 2,
-                    spin_result.spin_line_distance, 0U);
+                draw_small_text(image, x, 2, "S3 BACK D", 0U);
+                if(spin_result.spin_line_valid)
+                {
+                    x = draw_small_int(image, 38, 2,
+                        spin_result.spin_line_distance, 0U);
+                }
+                else
+                {
+                    draw_small_text(image, 38, 2, "---", 0U);
+                    x = 50;
+                }
+                draw_small_text(image, x, 2, " SPD", 0U);
+                draw_small_int(image, (int16)(x + 16), 2,
+                    spin_result.spin_speed_limit, 0U);
             }
             else
             {
-                draw_small_text(image, 18, 2, "--- D---", 0U);
-                x = 50;
+                draw_small_text(image, x, 2, "S3 Y", 0U);
+                if(spin_result.spin_line_valid)
+                {
+                    x = draw_small_int(image, 18, 2,
+                        spin_result.spin_line_y_bottom, 0U);
+                    draw_small_text(image, x, 2, " D", 0U);
+                    x = draw_small_int(image, (int16)(x + 8), 2,
+                        spin_result.spin_line_distance, 0U);
+                }
+                else
+                {
+                    draw_small_text(image, 18, 2, "--- D---", 0U);
+                    x = 50;
+                }
+                draw_small_text(image, x, 2, " SPD", 0U);
+                draw_small_int(image, (int16)(x + 16), 2,
+                    spin_result.spin_speed_limit, 0U);
             }
-            draw_small_text(image, x, 2, " SPD", 0U);
-            draw_small_int(image, (int16)(x + 16), 2,
-                spin_result.spin_speed_limit, 0U);
             break;
 
         default:
@@ -940,6 +1243,9 @@ static void update_global_debug_variables(void)
             g_enter_ready = enter_result.enter_ready;
             break;
 
+        case VISION_STATE_POST_LINE_FORWARD:
+            break;
+
         case VISION_STATE_SPIN_PROTECT:
             g_spin_line_valid = spin_result.spin_line_valid;
             g_spin_line_y_bottom = spin_result.spin_line_y_bottom;
@@ -970,6 +1276,10 @@ static void vision_process_one_frame(void)
             run_enter_line_stage();
             break;
 
+        case VISION_STATE_POST_LINE_FORWARD:
+            run_post_line_forward_stage();
+            break;
+
         case VISION_STATE_SPIN_PROTECT:
             run_spin_protect_stage();
             break;
@@ -980,7 +1290,10 @@ static void vision_process_one_frame(void)
     }
 
     update_global_debug_variables();
-    draw_status_overlay(display_image[0]);
+    if(VISION_STATUS_BAR_ENABLE)
+    {
+        draw_status_overlay(display_image[0]);
+    }
 }
 
 int main(void)
@@ -995,9 +1308,10 @@ int main(void)
         MT9V03X_W,
         MT9V03X_H);
 
-    reset_box_stage();
-    reset_enter_line_stage();
-    reset_spin_stage();
+#if !CAMERA_MINIMAL_RAW_TEST
+    vision_reset_to_s0();
+    vision_key_init();
+#endif
 
     while(mt9v03x_init())
     {
@@ -1006,10 +1320,35 @@ int main(void)
 
     while(true)
     {
+#if !CAMERA_MINIMAL_RAW_TEST
+        vision_key_update();
+#endif
+
         if(mt9v03x_finish_flag)
         {
             mt9v03x_finish_flag = 0U;
+#if CAMERA_MINIMAL_RAW_TEST
+    #if CAMERA_DIAG_TEST_PATTERN
+            uint16 x;
+            uint16 y;
+
+            for(y = 0U; y < MT9V03X_H; y++)
+            {
+                for(x = 0U; x < MT9V03X_W; x++)
+                {
+                    display_image[y][x] = (uint8)((uint32)x * 255U / (MT9V03X_W - 1U));
+                }
+            }
+    #else
+            memcpy(display_image[0], mt9v03x_image[0], MT9V03X_IMAGE_SIZE);
+    #endif
+#else
+#if VISION_RAW_IMAGE_TEST
+            memcpy(display_image[0], mt9v03x_image[0], MT9V03X_IMAGE_SIZE);
+#else
             vision_process_one_frame();
+#endif
+#endif
             seekfree_assistant_camera_send();
         }
     }
