@@ -7,9 +7,6 @@
 
 #include "zf_common_headfile.h"
 
-#define DEBUG_SIMPLE_FRAME_DUMP                 (0U)
-#define ASSISTANT_USE_WIRELESS_UART             (0U)
-
 #define BOX_WHITE_THRESHOLD                     (225U)
 #define BOX_ROI_X_MIN                           (5)
 #define BOX_ROI_X_MAX                           (MT9V03X_W - 6)
@@ -982,8 +979,8 @@ static void vision_process_one_frame(void)
             break;
     }
 
-    draw_status_overlay(display_image[0]);
     update_global_debug_variables();
+    draw_status_overlay(display_image[0]);
 }
 
 int main(void)
