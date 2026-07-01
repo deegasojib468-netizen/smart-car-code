@@ -52,6 +52,8 @@
 - K4 / 旧主板 S4 / P20_2：S3 -> S0，`g_mine_area_count++`。
 - K5 / 旧主板 S5 / P20_1：强制下一状态；`ENABLE_FORCE_NEXT_KEY = 0U` 时编译关闭。
 - K6 / 旧主板 S6 / P20_0：任意状态复位回 S0，不清空 `g_mine_area_count`。
+- P20.1 松开约 2.34V，低于理想 3.3V，继续作为已知风险观察。
+- 本次按键映射恢复基于稳定检查点 `057f74e58d87ebef8a474ada24439a5508b0494d` 之后进行；如实机测试失败，可回退到该提交。
 
 GPIO 配置现状：
 
@@ -61,7 +63,18 @@ GPIO 配置现状：
 - 初始化 API 会先将输出锁存值写为 `1U`，之后主文件中没有对这些按键执行输出写入。
 - K3/K4 均有 armed 机制和事件锁存；进入对应状态时清锁存和 armed，先观察到松开高电平才能 armed。
 - K3 事件只在 S2 产生并由 S2 消费后清零；K4 事件只在 S3 产生并由 S3 消费后清零。
-- 存在 `VISION_KEY_DEBOUNCE_COUNT = 20U` 的稳定电平/按下沿消抖链路，但 K3/K4 的 armed 和锁存实际直接使用 raw pressed 电平，没有使用消抖后的 `s_key_stable_level` 或 `pressed_edge`。K5/K6 使用消抖后的 `pressed_edge`。这是当前现状，本次未修改。
+- 存在 `VISION_KEY_DEBOUNCE_COUNT = 20U` 的稳定电平/按下沿消抖链路；K3 的显示、pressed、armed 和锁存统一使用每轮扫描直接读取的 `g_key_old_s3_raw_level`，K4 保持现有 raw pressed 逻辑，K5/K6 使用消抖后的 `pressed_edge`。
+
+K3 锁存问题记录：
+
+- 实机确认 P20_3 raw 电平能够从 H 变为 L，K3 GPIO 与按键线路当前可读。
+- 进入 S2 后 armed 能达到 `A1`，但修复前按下显示 `S2 K3L A1 K0 P1H`，且未进入 S3。
+- 因 raw 电平和 armed 已正常，问题方向是 K3 事件锁存/消费链路，不是继续优先怀疑硬件。
+- 当前修复为：S2 中先见 raw 高电平后 armed；之后 raw 低电平且 `A1` 时持续锁存 K3 事件并置 `g_key_post_forward_done`，不依赖单次下降沿。
+- K3 事件在松开时不清除，只在 S2 成功消费并进入 S3 时清除。
+- 用户已实机确认：S2 中按下 K3/P20_3 后可以进入后续识别流程，K3 锁存与消费链路当前可用。
+- 这是基于稳定检查点 `057f74e58d87ebef8a474ada24439a5508b0494d` 之后的可用版本；打开对象绘图图层前必须先保存该检查点。
+- 本次只处理 K3 锁存链路，未处理摄像头噪点问题。
 
 新主板残留检查：
 
@@ -101,7 +114,7 @@ GPIO 配置现状：
 
 - S0 有效：`S0 Xddd EX+ddd EN0/1`；无效：`S0 X--- EX--- EN0`。
 - S1：`S1 Yddd C0/1 L0/1`，无效 Y 显示 `---`。
-- S2：`S2 K3H/K3L A0/A1 K0/K1`。
+- S2：`S2 K3H/K3L A0/A1 K0/K1 P1H/P1L`。
 - S3：`S3 K4H/K4L A0/A1 K0/K1`。
 - 不再存在 `U8H/U8L`、`64H/64L` 或 `60H/60L` 状态栏残留。
 
@@ -136,9 +149,10 @@ GPIO 配置现状：
 7. 松开按键不是 3.3V 时，先查 GPIO 配置、后续初始化覆盖和硬件，不要先改状态机。
 8. 对象 overlay 已关，但状态栏 overlay 仍开；如果目标是严格纯图，当前状态不符合“全部 overlay 关闭”。
 9. 显示去噪已开，当前 DAP 图传不是 raw sensor 画面，会影响对原始噪点的直观判断。
-10. K3/K4 事件锁存路径使用 raw 电平而不是消抖后电平，实机需关注边沿抖动；本次不改按键逻辑。
+10. K3 事件锁存使用每轮直接读取的 raw 电平，并要求先见高电平 armed 后才允许低电平锁存；K4 保持原有逻辑。
 11. 涉及按键 GPIO 修改前，必须先读取 `docs/debug_notes/KEY_GPIO_DESIGN_SKILL.md`。
 12. 涉及按键 GPIO、按键映射、主板切换、按键状态机触发前，必须先读取 `docs/debug_notes/KEY_GPIO_DESIGN_SKILL.md`。
+13. P20.1 松开电压约 2.34V，不是理想 3.3V；当前只保留受 `ENABLE_FORCE_NEXT_KEY` 控制的 K5 强制下一状态功能，宏为 `0U` 时不参与跳转。
 
 ## 8. 下一步建议
 

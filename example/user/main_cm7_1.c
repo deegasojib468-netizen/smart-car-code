@@ -177,13 +177,14 @@ volatile uint8 g_key_post_forward_done = 0U;
 volatile uint8 g_key_spin_done = 0U;
 volatile uint8 g_key_force_next_state = 0U;
 volatile uint8 g_key_reset_to_s0 = 0U;
+volatile uint8 g_key_old_s3_raw_level = 1U;
+volatile uint8 g_key_old_s3_pressed = 0U;
+volatile uint8 g_key_old_s3_event_latched = 0U;
+volatile uint8 g_key_old_s3_armed = 0U;
 volatile uint8 g_key_old_s4_raw_level = 1U;
 volatile uint8 g_key_old_s4_pressed = 0U;
 volatile uint8 g_key_old_s4_event_latched = 0U;
 volatile uint8 g_key_old_s4_armed = 0U;
-volatile uint8 g_key_old_s5_pressed = 0U;
-volatile uint8 g_key_old_s5_event_latched = 0U;
-volatile uint8 g_key_old_s5_armed = 0U;
 
 volatile uint8 g_box_valid = 0U;
 volatile int16 g_box_center_x = -1;
@@ -515,10 +516,10 @@ static void reset_control_requests_for_new_area(void)
     g_key_spin_done = 0U;
     g_key_force_next_state = 0U;
     g_key_reset_to_s0 = 0U;
+    g_key_old_s3_event_latched = 0U;
+    g_key_old_s3_armed = 0U;
     g_key_old_s4_event_latched = 0U;
     g_key_old_s4_armed = 0U;
-    g_key_old_s5_event_latched = 0U;
-    g_key_old_s5_armed = 0U;
 }
 
 static void vision_reset_to_s0(void)
@@ -549,9 +550,9 @@ static void vision_set_state(vision_state_t new_state)
 
     if(VISION_STATE_POST_LINE_FORWARD == new_state)
     {
-        g_key_old_s5_event_latched = 0U;
+        g_key_old_s3_event_latched = 0U;
         g_key_post_forward_done = 0U;
-        g_key_old_s5_armed = 0U;
+        g_key_old_s3_armed = 0U;
     }
     else if(VISION_STATE_SPIN_PROTECT == new_state)
     {
@@ -634,14 +635,14 @@ static void vision_key_init(void)
         s_key_debounce_count[index] = 0U;
     }
 
+    g_key_old_s3_raw_level = s_key_last_sample[VISION_KEY_OLD_S3_INDEX];
+    g_key_old_s3_pressed = (GPIO_LOW == g_key_old_s3_raw_level) ? 1U : 0U;
+    g_key_old_s3_event_latched = 0U;
+    g_key_old_s3_armed = 0U;
     g_key_old_s4_raw_level = s_key_last_sample[VISION_KEY_OLD_S4_INDEX];
     g_key_old_s4_pressed = (GPIO_LOW == g_key_old_s4_raw_level) ? 1U : 0U;
     g_key_old_s4_event_latched = 0U;
     g_key_old_s4_armed = 0U;
-    g_key_old_s5_pressed =
-        (GPIO_LOW == s_key_stable_level[VISION_KEY_OLD_S5_INDEX]) ? 1U : 0U;
-    g_key_old_s5_event_latched = 0U;
-    g_key_old_s5_armed = 0U;
 }
 
 static void vision_key_update(void)
@@ -657,7 +658,12 @@ static void vision_key_update(void)
             OLD_BOARD_KEY_PORT,
             s_vision_key_port_pins[index]);
 
-        if(VISION_KEY_OLD_S4_INDEX == index)
+        if(VISION_KEY_OLD_S3_INDEX == index)
+        {
+            g_key_old_s3_raw_level = sample;
+            g_key_old_s3_pressed = (GPIO_LOW == g_key_old_s3_raw_level) ? 1U : 0U;
+        }
+        else if(VISION_KEY_OLD_S4_INDEX == index)
         {
             g_key_old_s4_raw_level = sample;
             g_key_old_s4_pressed = (GPIO_LOW == g_key_old_s4_raw_level) ? 1U : 0U;
@@ -689,18 +695,15 @@ static void vision_key_update(void)
 
     }
 
-    g_key_old_s5_pressed =
-        (GPIO_LOW == s_key_stable_level[VISION_KEY_OLD_S5_INDEX]) ? 1U : 0U;
-
     if(VISION_STATE_POST_LINE_FORWARD == (vision_state_t)g_vision_state)
     {
-        if(0U == g_key_old_s5_pressed)
+        if(GPIO_HIGH == g_key_old_s3_raw_level)
         {
-            g_key_old_s5_armed = 1U;
+            g_key_old_s3_armed = 1U;
         }
-        else if(g_key_old_s5_armed)
+        else if(g_key_old_s3_armed && g_key_old_s3_pressed)
         {
-            g_key_old_s5_event_latched = 1U;
+            g_key_old_s3_event_latched = 1U;
             g_key_post_forward_done = 1U;
         }
     }
@@ -1085,12 +1088,12 @@ static void run_post_line_forward_stage(void)
 {
     if(g_post_line_forward_done_input
     || g_key_post_forward_done
-    || g_key_old_s5_event_latched)
+    || g_key_old_s3_event_latched)
     {
         g_post_line_forward_done_input = 0U;
         g_key_post_forward_done = 0U;
-        g_key_old_s5_event_latched = 0U;
-        g_key_old_s5_armed = 0U;
+        g_key_old_s3_event_latched = 0U;
+        g_key_old_s3_armed = 0U;
         g_post_line_forward_request = 0U;
         g_spin_start_request = 1U;
         vision_set_state(VISION_STATE_SPIN_PROTECT);
@@ -1354,18 +1357,18 @@ static void draw_status_overlay(uint8 *image)
             break;
 
         case VISION_STATE_POST_LINE_FORWARD:
-            draw_small_text(image, x, 2, "S2 K5", 0U);
+            draw_small_text(image, x, 2, "S2 K3", 0U);
             draw_small_char(image, 22, 2,
-                Cy_GPIO_Read(GPIO_PRT20, 1U) ? 'H' : 'L', 0U);
+                g_key_old_s3_raw_level ? 'H' : 'L', 0U);
             draw_small_text(image, 26, 2, " A", 0U);
             draw_small_char(image, 34, 2,
-                g_key_old_s5_armed ? '1' : '0', 0U);
+                g_key_old_s3_armed ? '1' : '0', 0U);
             draw_small_text(image, 38, 2, " K", 0U);
             draw_small_char(image, 46, 2,
-                g_key_old_s5_event_latched ? '1' : '0', 0U);
-            draw_small_text(image, 50, 2, " P3", 0U);
+                g_key_old_s3_event_latched ? '1' : '0', 0U);
+            draw_small_text(image, 50, 2, " P1", 0U);
             draw_small_char(image, 62, 2,
-                Cy_GPIO_Read(GPIO_PRT20, 3U) ? 'H' : 'L', 0U);
+                Cy_GPIO_Read(GPIO_PRT20, 1U) ? 'H' : 'L', 0U);
             break;
 
         case VISION_STATE_SPIN_PROTECT:
