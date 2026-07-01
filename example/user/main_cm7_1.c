@@ -7,13 +7,16 @@
 
 #include "zf_common_headfile.h"
 
-#define CAMERA_MINIMAL_RAW_TEST                  (1U)
+#define CAMERA_MINIMAL_RAW_TEST                  (0U)
 #define CAMERA_DIAG_TEST_PATTERN                 (0U)
 
 #define VISION_RAW_IMAGE_TEST                    (0U)
 #define VISION_STATUS_BAR_ENABLE                 (1U)
 #define VISION_OBJECT_OVERLAY_ENABLE             (0U)
+#define VISION_DISPLAY_DENOISE_ENABLE            (0U)
 #define ENABLE_FORCE_NEXT_KEY                    (0U)
+#define P20_3_KEY_GPIO_DIAG_TEST                  (0U)
+#define P20_3_KEY_GPIO_DIAG_RECONFIG_FRAMES       (25U)
 
 #define BOX_WHITE_THRESHOLD                     (225U)
 #define BOX_ROI_X_MIN                           (5)
@@ -64,12 +67,22 @@
 #define BOUNDARY_RELEASE_DISTANCE               (30)
 #define BOUNDARY_RELEASE_STABLE_FRAMES          (3U)
 
+#define OLD_BOARD_KEYS                          (1U)
 #define VISION_KEY_DEBOUNCE_COUNT               (20U)
 #define VISION_KEY_COUNT                        (4U)
-#define VISION_KEY_POST_FORWARD_INDEX           (0U)
-#define VISION_KEY_SPIN_DONE_INDEX              (1U)
-#define VISION_KEY_FORCE_NEXT_INDEX             (2U)
-#define VISION_KEY_RESET_INDEX                  (3U)
+#define OLD_BOARD_KEY_PORT                      (GPIO_PRT20)
+#define KEY_OLD_S3_PIN                          (P20_3)
+#define KEY_OLD_S4_PIN                          (P20_2)
+#define KEY_OLD_S5_PIN                          (P20_1)
+#define KEY_OLD_S6_PIN                          (P20_0)
+#define KEY_OLD_S3_PORT_PIN                     (3U)
+#define KEY_OLD_S4_PORT_PIN                     (2U)
+#define KEY_OLD_S5_PORT_PIN                     (1U)
+#define KEY_OLD_S6_PORT_PIN                     (0U)
+#define VISION_KEY_OLD_S3_INDEX                 (0U)
+#define VISION_KEY_OLD_S4_INDEX                 (1U)
+#define VISION_KEY_OLD_S5_INDEX                 (2U)
+#define VISION_KEY_OLD_S6_INDEX                 (3U)
 
 typedef enum
 {
@@ -137,9 +150,12 @@ static uint8 s_first_line_cross_count = 0U;
 static uint8 s_first_line_crossed_latched = 0U;
 static uint8 s_boundary_release_count = 0U;
 
-static const gpio_pin_enum s_vision_key_pins[VISION_KEY_COUNT] =
+static const uint8 s_vision_key_port_pins[VISION_KEY_COUNT] =
 {
-    P20_3, P20_2, P20_1, P20_0
+    KEY_OLD_S3_PORT_PIN,
+    KEY_OLD_S4_PORT_PIN,
+    KEY_OLD_S5_PORT_PIN,
+    KEY_OLD_S6_PORT_PIN
 };
 static uint8 s_key_last_sample[VISION_KEY_COUNT] = {1U, 1U, 1U, 1U};
 static uint8 s_key_stable_level[VISION_KEY_COUNT] = {1U, 1U, 1U, 1U};
@@ -161,6 +177,13 @@ volatile uint8 g_key_post_forward_done = 0U;
 volatile uint8 g_key_spin_done = 0U;
 volatile uint8 g_key_force_next_state = 0U;
 volatile uint8 g_key_reset_to_s0 = 0U;
+volatile uint8 g_key_old_s4_raw_level = 1U;
+volatile uint8 g_key_old_s4_pressed = 0U;
+volatile uint8 g_key_old_s4_event_latched = 0U;
+volatile uint8 g_key_old_s4_armed = 0U;
+volatile uint8 g_key_old_s5_pressed = 0U;
+volatile uint8 g_key_old_s5_event_latched = 0U;
+volatile uint8 g_key_old_s5_armed = 0U;
 
 volatile uint8 g_box_valid = 0U;
 volatile int16 g_box_center_x = -1;
@@ -172,6 +195,7 @@ volatile uint8 g_enter_line_enable = 0U;
 
 volatile uint8 g_line1_valid = 0U;
 volatile int16 g_line1_y_bottom = -1;
+volatile uint8 g_line1_latched = 0U;
 volatile uint8 g_first_line_crossed = 0U;
 volatile uint8 g_enter_ready = 0U;
 
@@ -180,6 +204,54 @@ volatile int16 g_spin_line_y_bottom = -1;
 volatile int16 g_spin_line_distance = -1;
 volatile uint8 g_spin_speed_limit = SPIN_SPEED_NORMAL;
 volatile uint16 g_spin_line_score = 0U;
+
+static void denoise_display_image(void)
+{
+    const uint8 *source = work_image[0];
+    uint8 *target = display_image[0];
+    int16 x;
+    int16 y;
+
+    for(y = 1; y < (int16)MT9V03X_H - 1; y++)
+    {
+        for(x = 1; x < (int16)MT9V03X_W - 1; x++)
+        {
+            uint32 index = (uint32)y * MT9V03X_W + (uint32)x;
+            uint16 neighbor_sum;
+            uint8 neighbor_average;
+            uint8 bright_neighbors = 0U;
+
+            if(source[index] >= 30U)
+            {
+                continue;
+            }
+
+            neighbor_sum = source[index - MT9V03X_W - 1U]
+                         + source[index - MT9V03X_W]
+                         + source[index - MT9V03X_W + 1U]
+                         + source[index - 1U]
+                         + source[index + 1U]
+                         + source[index + MT9V03X_W - 1U]
+                         + source[index + MT9V03X_W]
+                         + source[index + MT9V03X_W + 1U];
+
+            bright_neighbors += (source[index - MT9V03X_W - 1U] > 80U) ? 1U : 0U;
+            bright_neighbors += (source[index - MT9V03X_W] > 80U) ? 1U : 0U;
+            bright_neighbors += (source[index - MT9V03X_W + 1U] > 80U) ? 1U : 0U;
+            bright_neighbors += (source[index - 1U] > 80U) ? 1U : 0U;
+            bright_neighbors += (source[index + 1U] > 80U) ? 1U : 0U;
+            bright_neighbors += (source[index + MT9V03X_W - 1U] > 80U) ? 1U : 0U;
+            bright_neighbors += (source[index + MT9V03X_W] > 80U) ? 1U : 0U;
+            bright_neighbors += (source[index + MT9V03X_W + 1U] > 80U) ? 1U : 0U;
+
+            neighbor_average = (uint8)(neighbor_sum / 8U);
+            if((bright_neighbors >= 6U) && (neighbor_average > 80U))
+            {
+                target[index] = neighbor_average;
+            }
+        }
+    }
+}
 
 static void draw_safe_hline(uint8 *image, int16 y, int16 x0, int16 x1, uint8 color)
 {
@@ -273,14 +345,19 @@ static void draw_small_char(uint8 *image, int16 x, int16 y, char ch, uint8 color
         case 'A': rows[0] = 2U; rows[1] = 5U; rows[2] = 7U; rows[3] = 5U; rows[4] = 5U; break;
         case 'B': rows[0] = 6U; rows[1] = 5U; rows[2] = 6U; rows[3] = 5U; rows[4] = 6U; break;
         case 'F': rows[0] = 7U; rows[1] = 4U; rows[2] = 6U; rows[3] = 4U; rows[4] = 4U; break;
+        case 'G': rows[0] = 7U; rows[1] = 4U; rows[2] = 5U; rows[3] = 5U; rows[4] = 7U; break;
+        case 'H': rows[0] = 5U; rows[1] = 5U; rows[2] = 7U; rows[3] = 5U; rows[4] = 5U; break;
         case 'I': rows[0] = 7U; rows[1] = 2U; rows[2] = 2U; rows[3] = 2U; rows[4] = 7U; break;
         case 'K': rows[0] = 5U; rows[1] = 5U; rows[2] = 6U; rows[3] = 5U; rows[4] = 5U; break;
+        case 'L': rows[0] = 4U; rows[1] = 4U; rows[2] = 4U; rows[3] = 4U; rows[4] = 7U; break;
         case 'M': rows[0] = 5U; rows[1] = 7U; rows[2] = 7U; rows[3] = 5U; rows[4] = 5U; break;
         case 'T': rows[0] = 7U; rows[1] = 2U; rows[2] = 2U; rows[3] = 2U; rows[4] = 2U; break;
+        case 'U': rows[0] = 5U; rows[1] = 5U; rows[2] = 5U; rows[3] = 5U; rows[4] = 7U; break;
         case 'W': rows[0] = 5U; rows[1] = 5U; rows[2] = 7U; rows[3] = 7U; rows[4] = 5U; break;
         case ' ': break;
         case '+': rows[0] = 0U; rows[1] = 2U; rows[2] = 7U; rows[3] = 2U; rows[4] = 0U; break;
         case '-': rows[0] = 0U; rows[1] = 0U; rows[2] = 7U; rows[3] = 0U; rows[4] = 0U; break;
+        case '.': rows[0] = 0U; rows[1] = 0U; rows[2] = 0U; rows[3] = 0U; rows[4] = 2U; break;
         case '0': rows[0] = 7U; rows[1] = 5U; rows[2] = 5U; rows[3] = 5U; rows[4] = 7U; break;
         case '1': rows[0] = 2U; rows[1] = 6U; rows[2] = 2U; rows[3] = 2U; rows[4] = 7U; break;
         case '2': rows[0] = 7U; rows[1] = 1U; rows[2] = 7U; rows[3] = 4U; rows[4] = 7U; break;
@@ -347,6 +424,45 @@ static int16 draw_small_int(uint8 *image, int16 x, int16 y, int16 value, uint8 c
     return x;
 }
 
+#if P20_3_KEY_GPIO_DIAG_TEST
+static void p20_3_key_gpio_diag_init(void)
+{
+    cy_stc_gpio_pin_config_t pin_config = {0};
+
+    pin_config.outVal = 1U;
+    pin_config.driveMode = CY_GPIO_DM_PULLUP;
+    pin_config.hsiom = HSIOM_SEL_GPIO;
+    pin_config.intEdge = CY_GPIO_INTR_DISABLE;
+    pin_config.intMask = 0U;
+    pin_config.vtrip = CY_GPIO_VTRIP_CMOS;
+
+    (void)Cy_GPIO_Pin_Init(GPIO_PRT20, 3U, &pin_config);
+}
+
+static void p20_3_key_gpio_diag_periodic_refresh(void)
+{
+    static uint8 frame_count = 0U;
+
+    frame_count++;
+    if(frame_count >= P20_3_KEY_GPIO_DIAG_RECONFIG_FRAMES)
+    {
+        frame_count = 0U;
+        p20_3_key_gpio_diag_init();
+    }
+}
+
+static void draw_p20_3_key_gpio_diag(void)
+{
+    uint8 p20_3_raw_level = (uint8)Cy_GPIO_Read(GPIO_PRT20, 3U);
+
+    memset(display_image[0], 128, MT9V03X_IMAGE_SIZE);
+    draw_small_text(display_image[0], 2, 2, "P20.3 DIAG", 0U);
+    draw_small_text(display_image[0], 2, 9, "P20.3", 0U);
+    draw_small_char(display_image[0], 26, 9,
+        p20_3_raw_level ? 'H' : 'L', 0U);
+}
+#endif
+
 static void reset_box_stage(void)
 {
     memset(&box_result, 0, sizeof(box_result));
@@ -364,6 +480,7 @@ static void reset_enter_line_stage(void)
     enter_result.line1_y_top = -1;
     enter_result.line1_y_bottom = -1;
     enter_result.line1_y_center = -1;
+    g_line1_latched = 0U;
     s_first_line_cross_count = 0U;
     s_first_line_crossed_latched = 0U;
 }
@@ -398,6 +515,10 @@ static void reset_control_requests_for_new_area(void)
     g_key_spin_done = 0U;
     g_key_force_next_state = 0U;
     g_key_reset_to_s0 = 0U;
+    g_key_old_s4_event_latched = 0U;
+    g_key_old_s4_armed = 0U;
+    g_key_old_s5_event_latched = 0U;
+    g_key_old_s5_armed = 0U;
 }
 
 static void vision_reset_to_s0(void)
@@ -425,6 +546,20 @@ static void vision_set_state(vision_state_t new_state)
     reset_box_stage();
     reset_enter_line_stage();
     reset_spin_stage();
+
+    if(VISION_STATE_POST_LINE_FORWARD == new_state)
+    {
+        g_key_old_s5_event_latched = 0U;
+        g_key_post_forward_done = 0U;
+        g_key_old_s5_armed = 0U;
+    }
+    else if(VISION_STATE_SPIN_PROTECT == new_state)
+    {
+        g_key_old_s4_event_latched = 0U;
+        g_key_spin_done = 0U;
+        g_key_old_s4_armed = 0U;
+    }
+
     g_vision_state = (uint8)new_state;
 }
 
@@ -463,17 +598,50 @@ static void vision_force_next_state(void)
 }
 #endif
 
+static void configure_old_board_keys(void)
+{
+    cy_stc_gpio_pin_config_t pin_config = {0};
+    uint8 index;
+
+    pin_config.outVal = 1U;
+    pin_config.driveMode = CY_GPIO_DM_PULLUP;
+    pin_config.hsiom = HSIOM_SEL_GPIO;
+    pin_config.intEdge = CY_GPIO_INTR_DISABLE;
+    pin_config.intMask = 0U;
+    pin_config.vtrip = CY_GPIO_VTRIP_CMOS;
+
+    for(index = 0U; index < VISION_KEY_COUNT; index++)
+    {
+        (void)Cy_GPIO_Pin_Init(
+            OLD_BOARD_KEY_PORT,
+            s_vision_key_port_pins[index],
+            &pin_config);
+    }
+}
+
 static void vision_key_init(void)
 {
     uint8 index;
 
+    configure_old_board_keys();
+
     for(index = 0U; index < VISION_KEY_COUNT; index++)
     {
-        gpio_init(s_vision_key_pins[index], GPI, GPIO_HIGH, GPI_PULL_UP);
-        s_key_last_sample[index] = gpio_get_level(s_vision_key_pins[index]);
+        s_key_last_sample[index] = (uint8)Cy_GPIO_Read(
+            OLD_BOARD_KEY_PORT,
+            s_vision_key_port_pins[index]);
         s_key_stable_level[index] = s_key_last_sample[index];
         s_key_debounce_count[index] = 0U;
     }
+
+    g_key_old_s4_raw_level = s_key_last_sample[VISION_KEY_OLD_S4_INDEX];
+    g_key_old_s4_pressed = (GPIO_LOW == g_key_old_s4_raw_level) ? 1U : 0U;
+    g_key_old_s4_event_latched = 0U;
+    g_key_old_s4_armed = 0U;
+    g_key_old_s5_pressed =
+        (GPIO_LOW == s_key_stable_level[VISION_KEY_OLD_S5_INDEX]) ? 1U : 0U;
+    g_key_old_s5_event_latched = 0U;
+    g_key_old_s5_armed = 0U;
 }
 
 static void vision_key_update(void)
@@ -485,7 +653,15 @@ static void vision_key_update(void)
 
     for(index = 0U; index < VISION_KEY_COUNT; index++)
     {
-        uint8 sample = gpio_get_level(s_vision_key_pins[index]);
+        uint8 sample = (uint8)Cy_GPIO_Read(
+            OLD_BOARD_KEY_PORT,
+            s_vision_key_port_pins[index]);
+
+        if(VISION_KEY_OLD_S4_INDEX == index)
+        {
+            g_key_old_s4_raw_level = sample;
+            g_key_old_s4_pressed = (GPIO_LOW == g_key_old_s4_raw_level) ? 1U : 0U;
+        }
 
         if(sample == s_key_last_sample[index])
         {
@@ -510,22 +686,40 @@ static void vision_key_update(void)
                 pressed_edge[index] = 1U;
             }
         }
+
     }
 
-    if(pressed_edge[VISION_KEY_POST_FORWARD_INDEX]
-    && (VISION_STATE_POST_LINE_FORWARD == (vision_state_t)g_vision_state))
+    g_key_old_s5_pressed =
+        (GPIO_LOW == s_key_stable_level[VISION_KEY_OLD_S5_INDEX]) ? 1U : 0U;
+
+    if(VISION_STATE_POST_LINE_FORWARD == (vision_state_t)g_vision_state)
     {
-        g_key_post_forward_done = 1U;
+        if(0U == g_key_old_s5_pressed)
+        {
+            g_key_old_s5_armed = 1U;
+        }
+        else if(g_key_old_s5_armed)
+        {
+            g_key_old_s5_event_latched = 1U;
+            g_key_post_forward_done = 1U;
+        }
     }
 
-    if(pressed_edge[VISION_KEY_SPIN_DONE_INDEX]
-    && (VISION_STATE_SPIN_PROTECT == (vision_state_t)g_vision_state))
+    if(VISION_STATE_SPIN_PROTECT == (vision_state_t)g_vision_state)
     {
-        g_key_spin_done = 1U;
+        if(0U == g_key_old_s4_pressed)
+        {
+            g_key_old_s4_armed = 1U;
+        }
+        else if(g_key_old_s4_armed)
+        {
+            g_key_old_s4_event_latched = 1U;
+            g_key_spin_done = 1U;
+        }
     }
 
 #if ENABLE_FORCE_NEXT_KEY
-    if(pressed_edge[VISION_KEY_FORCE_NEXT_INDEX])
+    if(pressed_edge[VISION_KEY_OLD_S5_INDEX])
     {
         g_key_force_next_state = 1U;
         vision_force_next_state();
@@ -533,7 +727,7 @@ static void vision_key_update(void)
     }
 #endif
 
-    if(pressed_edge[VISION_KEY_RESET_INDEX])
+    if(pressed_edge[VISION_KEY_OLD_S6_INDEX])
     {
         g_key_reset_to_s0 = 1U;
         vision_reset_to_s0();
@@ -868,6 +1062,10 @@ static void draw_enter_line_overlay(uint8 *image, const enter_line_result_t *res
 static void run_enter_line_stage(void)
 {
     detect_enter_line1_segment(work_image[0], &enter_result);
+    if(enter_result.line1_valid)
+    {
+        g_line1_latched = 1U;
+    }
     update_first_line_cross_state(&enter_result);
     if(VISION_OBJECT_OVERLAY_ENABLE)
     {
@@ -885,10 +1083,14 @@ static void run_enter_line_stage(void)
 
 static void run_post_line_forward_stage(void)
 {
-    if(g_post_line_forward_done_input || g_key_post_forward_done)
+    if(g_post_line_forward_done_input
+    || g_key_post_forward_done
+    || g_key_old_s5_event_latched)
     {
         g_post_line_forward_done_input = 0U;
         g_key_post_forward_done = 0U;
+        g_key_old_s5_event_latched = 0U;
+        g_key_old_s5_armed = 0U;
         g_post_line_forward_request = 0U;
         g_spin_start_request = 1U;
         vision_set_state(VISION_STATE_SPIN_PROTECT);
@@ -1083,10 +1285,12 @@ static void run_spin_protect_stage(void)
         draw_nearest_line_overlay(display_image[0], &spin_result);
     }
 
-    if(g_spin_done_input || g_key_spin_done)
+    if(g_spin_done_input || g_key_spin_done || g_key_old_s4_event_latched)
     {
         g_spin_done_input = 0U;
         g_key_spin_done = 0U;
+        g_key_old_s4_event_latched = 0U;
+        g_key_old_s4_armed = 0U;
         g_spin_start_request = 0U;
         g_boundary_stop_request = 0U;
         g_boundary_back_request = 0U;
@@ -1144,63 +1348,45 @@ static void draw_status_overlay(uint8 *image)
             draw_small_char(image, (int16)(x + 8), 2,
                 enter_result.first_line_crossed ? '1' : '0', 0U);
             x = (int16)(x + 12);
-            draw_small_text(image, x, 2, " R", 0U);
+            draw_small_text(image, x, 2, " L", 0U);
             draw_small_char(image, (int16)(x + 8), 2,
-                enter_result.enter_ready ? '1' : '0', 0U);
+                g_line1_latched ? '1' : '0', 0U);
             break;
 
         case VISION_STATE_POST_LINE_FORWARD:
-            draw_small_text(image, x, 2, "S2 WAIT FWD K", 0U);
-            draw_small_char(image, 54, 2,
-                g_key_post_forward_done ? '1' : '0', 0U);
-            draw_small_text(image, 58, 2, " M", 0U);
-            draw_small_char(image, 66, 2,
-                g_post_line_forward_done_input ? '1' : '0', 0U);
+            draw_small_text(image, x, 2, "S2 K5", 0U);
+            draw_small_char(image, 22, 2,
+                Cy_GPIO_Read(GPIO_PRT20, 1U) ? 'H' : 'L', 0U);
+            draw_small_text(image, 26, 2, " A", 0U);
+            draw_small_char(image, 34, 2,
+                g_key_old_s5_armed ? '1' : '0', 0U);
+            draw_small_text(image, 38, 2, " K", 0U);
+            draw_small_char(image, 46, 2,
+                g_key_old_s5_event_latched ? '1' : '0', 0U);
+            draw_small_text(image, 50, 2, " P3", 0U);
+            draw_small_char(image, 62, 2,
+                Cy_GPIO_Read(GPIO_PRT20, 3U) ? 'H' : 'L', 0U);
             break;
 
         case VISION_STATE_SPIN_PROTECT:
-            if(g_boundary_back_request)
-            {
-                draw_small_text(image, x, 2, "S3 BACK D", 0U);
-                if(spin_result.spin_line_valid)
-                {
-                    x = draw_small_int(image, 38, 2,
-                        spin_result.spin_line_distance, 0U);
-                }
-                else
-                {
-                    draw_small_text(image, 38, 2, "---", 0U);
-                    x = 50;
-                }
-                draw_small_text(image, x, 2, " SPD", 0U);
-                draw_small_int(image, (int16)(x + 16), 2,
-                    spin_result.spin_speed_limit, 0U);
-            }
-            else
-            {
-                draw_small_text(image, x, 2, "S3 Y", 0U);
-                if(spin_result.spin_line_valid)
-                {
-                    x = draw_small_int(image, 18, 2,
-                        spin_result.spin_line_y_bottom, 0U);
-                    draw_small_text(image, x, 2, " D", 0U);
-                    x = draw_small_int(image, (int16)(x + 8), 2,
-                        spin_result.spin_line_distance, 0U);
-                }
-                else
-                {
-                    draw_small_text(image, 18, 2, "--- D---", 0U);
-                    x = 50;
-                }
-                draw_small_text(image, x, 2, " SPD", 0U);
-                draw_small_int(image, (int16)(x + 16), 2,
-                    spin_result.spin_speed_limit, 0U);
-            }
+            draw_small_text(image, x, 2, "S3 K4", 0U);
+            draw_small_char(image, 22, 2,
+                g_key_old_s4_raw_level ? 'H' : 'L', 0U);
+            draw_small_text(image, 26, 2, " A", 0U);
+            draw_small_char(image, 34, 2,
+                g_key_old_s4_armed ? '1' : '0', 0U);
+            draw_small_text(image, 38, 2, " K", 0U);
+            draw_small_char(image, 46, 2,
+                g_key_old_s4_event_latched ? '1' : '0', 0U);
             break;
 
         default:
             break;
     }
+
+#if !VISION_DISPLAY_DENOISE_ENABLE
+    draw_small_text(image, (int16)(MT9V03X_W - 18U), 2, "RAWD", 0U);
+#endif
 }
 
 static void update_global_debug_variables(void)
@@ -1264,6 +1450,11 @@ static void vision_process_one_frame(void)
     memcpy(work_image[0], mt9v03x_image[0], MT9V03X_IMAGE_SIZE);
     memcpy(display_image[0], mt9v03x_image[0], MT9V03X_IMAGE_SIZE);
 
+    if(VISION_DISPLAY_DENOISE_ENABLE)
+    {
+        denoise_display_image();
+    }
+
     vision_clear_current_frame_result();
 
     switch((vision_state_t)g_vision_state)
@@ -1296,6 +1487,7 @@ static void vision_process_one_frame(void)
     }
 }
 
+
 int main(void)
 {
     clock_init(SYSTEM_CLOCK_250M);
@@ -1308,7 +1500,9 @@ int main(void)
         MT9V03X_W,
         MT9V03X_H);
 
-#if !CAMERA_MINIMAL_RAW_TEST
+#if P20_3_KEY_GPIO_DIAG_TEST
+    p20_3_key_gpio_diag_init();
+#elif !CAMERA_MINIMAL_RAW_TEST
     vision_reset_to_s0();
     vision_key_init();
 #endif
@@ -1318,15 +1512,23 @@ int main(void)
         system_delay_ms(500U);
     }
 
+#if P20_3_KEY_GPIO_DIAG_TEST
+    p20_3_key_gpio_diag_init();
+#endif
+
     while(true)
     {
-#if !CAMERA_MINIMAL_RAW_TEST
+#if !P20_3_KEY_GPIO_DIAG_TEST && !CAMERA_MINIMAL_RAW_TEST
         vision_key_update();
 #endif
 
         if(mt9v03x_finish_flag)
         {
             mt9v03x_finish_flag = 0U;
+#if P20_3_KEY_GPIO_DIAG_TEST
+            p20_3_key_gpio_diag_periodic_refresh();
+            draw_p20_3_key_gpio_diag();
+#else
 #if CAMERA_MINIMAL_RAW_TEST
     #if CAMERA_DIAG_TEST_PATTERN
             uint16 x;
@@ -1347,6 +1549,7 @@ int main(void)
             memcpy(display_image[0], mt9v03x_image[0], MT9V03X_IMAGE_SIZE);
 #else
             vision_process_one_frame();
+#endif
 #endif
 #endif
             seekfree_assistant_camera_send();
